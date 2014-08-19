@@ -2,10 +2,14 @@
 
 import random
 import time
+import warnings
+
 from redis.exceptions import ConnectionError
+
 from django.conf import settings
 from django.utils.datastructures import SortedDict
-from . import default
+
+from .default import DEFAULT_TIMEOUT, DefaultClient
 from ..exceptions import ConnectionInterrupted
 
 
@@ -27,17 +31,17 @@ def _is_expired(x):
 
     if val >= CACHE_HERD_TIMEOUT:
         return True
-    else:
-        return False
+    return False
 
 
-class HerdClient(default.DefaultClient):
+class HerdClient(DefaultClient):
     def __init__(self, *args, **kwargs):
         self._marker = Marker()
         super(HerdClient, self).__init__(*args, **kwargs)
 
     def _pack(self, value, timeout):
-        herd_timeout = (timeout or self.default_timeout) + int(time.time())
+        herd_timeout = ((timeout or self._backend.default_timeout)
+                        + int(time.time()))
         return (self._marker, value, herd_timeout)
 
     def _unpack(self, value):
@@ -56,14 +60,18 @@ class HerdClient(default.DefaultClient):
 
         return unpacked, False
 
-    def set(self, key, value, timeout=None, version=None,
+    def set(self, key, value, timeout=DEFAULT_TIMEOUT, version=None,
             client=None, nx=False):
 
-        if timeout == 0:
+        if timeout == 0 or timeout is None:
             return super(HerdClient, self).set(key, value, timeout=timeout,
                                                version=version, client=client,
                                                nx=nx)
-        if timeout is None:
+        if timeout is True:
+            warnings.warn("Using True as timeout value, is now deprecated.", DeprecationWarning)
+            timeout = self._backend.default_timeout
+
+        if timeout == DEFAULT_TIMEOUT:
             timeout = self._backend.default_timeout
 
         packed = self._pack(value, timeout)
@@ -75,7 +83,7 @@ class HerdClient(default.DefaultClient):
 
     def get(self, key, default=None, version=None, client=None):
         packed = super(HerdClient, self).get(key, default=default,
-                                            version=version, client=client)
+                                             version=version, client=client)
         val, refresh = self._unpack(packed)
 
         if refresh:
@@ -92,7 +100,7 @@ class HerdClient(default.DefaultClient):
 
         recovered_data = SortedDict()
 
-        new_keys = list(map(lambda key: self.make_key(key, version=version), keys))
+        new_keys = [self.make_key(key, version=version) for key in keys]
         map_keys = dict(zip(new_keys, keys))
 
         try:
@@ -105,14 +113,11 @@ class HerdClient(default.DefaultClient):
                 continue
 
             val, refresh = self._unpack(self.unpickle(value))
-            if refresh:
-                recovered_data[map_keys[key]] = None
-            else:
-                recovered_data[map_keys[key]] = val
+            recovered_data[map_keys[key]] = None if refresh else val
 
         return recovered_data
 
-    def set_many(self, data, timeout=None, version=None, client=None,
+    def set_many(self, data, timeout=DEFAULT_TIMEOUT, version=None, client=None,
                  herd=True):
         """
         Set a bunch of values in the cache at once from a dict of key/value
@@ -124,10 +129,7 @@ class HerdClient(default.DefaultClient):
         if client is None:
             client = self.get_client(write=True)
 
-        if herd:
-            set_function = self.set
-        else:
-            set_function = super(HerdClient, self).set
+        set_function = self.set if herd else super(HerdClient, self).set
 
         try:
             pipeline = client.pipeline()

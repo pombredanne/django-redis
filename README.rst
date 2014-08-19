@@ -4,42 +4,20 @@ Redis cache backend for Django
 
 Full featured redis cache backend for Django.
 
-.. image:: https://travis-ci.org/niwibe/django-redis.png?branch=master
+.. image:: https://img.shields.io/travis/niwibe/django-redis.svg?style=flat
     :target: https://travis-ci.org/niwibe/django-redis
 
-.. image:: https://pypip.in/v/django-redis/badge.png
-    :target: https://crate.io/packages/django-redis
+.. image:: https://img.shields.io/pypi/v/django-redis.svg?style=flat
+    :target: https://pypi.python.org/pypi/django-redis
 
-.. image:: https://pypip.in/d/django-redis/badge.png
-    :target: https://crate.io/packages/django-redis
+.. image:: https://img.shields.io/pypi/dm/django-redis.svg?style=flat
+    :target: https://pypi.python.org/pypi/django-redis
 
 
 Documentation
 -------------
 
-Read the Docs: https://django-redis.readthedocs.org/en/latest/
-
-Features:
----------
-
-
-* In active development.
-* Support for Master-Slave setup.
-* Support client side Sharding setup
-* Complete battery of tests (accepting improvements).
-* Used in production environments on several projects.
-* Can set keys with infinite timeout: ``cache.set('key', 'value', timeout=0)``
-* Pluggable clients.
-* Python3 support with same codebase.
-* Supports Django: 1.3, 1.4, 1.5 and 1.6
-* Can take advantage of the connection pool with directly access to the raw redis connection.
-* Can emulate memcached backend behavior with connection exceptions (see more :ref:`Settings <settings>`)
-
-
-Future plans/In developement
-----------------------------
-
-* Auto failover
+http://niwibe.github.io/django-redis/
 
 
 How to install
@@ -49,3 +27,12 @@ Run ``python setup.py install`` to install,
 or place ``redis_cache`` on your Python path.
 
 You can also install it with: ``pip install django-redis``
+
+
+Build Doc
+---------
+
+For build documentation, you should have installed: asciidoc, gnu make and pygments.
+
+Having all dependencies installed, for build documentation you should execute ``make``
+on ``doc/`` directory.

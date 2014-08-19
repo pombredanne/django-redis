@@ -9,7 +9,7 @@ import hashlib
 class HashRing(object):
     nodes = []
 
-    def __init__(self, nodes=[], replicas=128):
+    def __init__(self, nodes=(), replicas=128):
         self.replicas = replicas
         self.ring = {}
         self.sorted_keys = []
@@ -46,7 +46,7 @@ class HashRing(object):
 
         _hash = hashlib.sha256(key.encode('utf-8')).hexdigest()
         idx = bisect.bisect(self.sorted_keys, _hash)
-        idx = min(idx, (self.replicas * len(self.nodes))-1)
+        idx = min(idx-1, (self.replicas * len(self.nodes))-1)
         return (self.ring[self.sorted_keys[idx]], idx)
 
     def iter_nodes(self, key):

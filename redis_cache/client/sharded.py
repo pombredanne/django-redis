@@ -4,14 +4,20 @@ from __future__ import absolute_import, unicode_literals
 
 import re
 
-
-from django.utils.datastructures import SortedDict
-from django.conf import settings
 from redis.exceptions import ConnectionError
+
+from django.conf import settings
+from django.utils.datastructures import SortedDict
+
+try:
+    from django.utils.encoding import smart_text
+except ImportError:
+    from django.utils.encoding import smart_unicode as smart_text
 
 from ..hash_ring import HashRing
 from ..exceptions import ConnectionInterrupted
-from .default import DefaultClient
+from ..util import CacheKey
+from .default import DefaultClient, DEFAULT_TIMEOUT
 
 
 class ShardClient(DefaultClient):
@@ -33,8 +39,7 @@ class ShardClient(DefaultClient):
         connection_dict = {}
         for name in self._server:
             host, port, db = self.parse_connection_string(name)
-            connection_dict[name] = self._connect(host, port, db)
-
+            connection_dict[name] = self.connection_factory.connect(host, port, db)
         return connection_dict
 
     def get_server_name(self, _key):
@@ -49,15 +54,15 @@ class ShardClient(DefaultClient):
         name = self.get_server_name(key)
         return self._serverdict[name]
 
-    def add(self,  key, value, timeout=None, version=None, client=None):
+    def add(self, key, value, timeout=DEFAULT_TIMEOUT, version=None, client=None):
         if client is None:
             key = self.make_key(key, version=version)
             client = self.get_server(key)
 
         return super(ShardClient, self)\
-            .add(key=key, value=value, version=version, client=client)
+            .add(key=key, value=value, version=version, client=client, timeout=timeout)
 
-    def get(self,  key, default=None, version=None, client=None):
+    def get(self, key, default=None, version=None, client=None):
         if client is None:
             key = self.make_key(key, version=version)
             client = self.get_server(key)
@@ -84,7 +89,7 @@ class ShardClient(DefaultClient):
             recovered_data[map_keys[key]] = value
         return recovered_data
 
-    def set(self, key, value, timeout=None, version=None, client=None, nx=False):
+    def set(self, key, value, timeout=DEFAULT_TIMEOUT, version=None, client=None, nx=False):
         """
         Persist a value to the cache, and set an optional expiration time.
         """
@@ -92,11 +97,11 @@ class ShardClient(DefaultClient):
             key = self.make_key(key, version=version)
             client = self.get_server(key)
 
-        return super(ShardClient, self).set(
-                        key=key, value=value, timeout=timeout,
-                        version=version, client=client, nx=nx)
+        return super(ShardClient, self).set(key=key, value=value,
+                                            timeout=timeout, version=version,
+                                            client=client, nx=nx)
 
-    def set_many(self, data, timeout=None, version=None):
+    def set_many(self, data, timeout=DEFAULT_TIMEOUT, version=None):
         """
         Set a bunch of values in the cache at once from a dict of key/value
         pairs. This is much more efficient than calling set() multiple times.
@@ -133,17 +138,39 @@ class ShardClient(DefaultClient):
         """
         Remove multiple keys at once.
         """
-        for key in map(lambda key: self.make_key(key, version=version), keys):
+        res = 0
+        for key in [self.make_key(k, version=version) for k in keys]:
             client = self.get_server(key)
-            self.delete(key, client=client)
+            res += self.delete(key, client=client)
+        return res
 
     def incr_version(self, key, delta=1, version=None, client=None):
         if client is None:
             key = self.make_key(key, version=version)
             client = self.get_server(key)
 
-        return super(ShardClient, self)\
-            .incr_version(key=key, delta=delta, version=version, client=client)
+        if version is None:
+            version = self._backend.version
+
+        old_key = self.make_key(key, version)
+        value = self.get(old_key, version=version, client=client)
+
+        try:
+            ttl = client.ttl(old_key)
+        except ConnectionError:
+            raise ConnectionInterrupted(connection=client)
+
+        if value is None:
+            raise ValueError("Key '%s' not found" % key)
+
+        if isinstance(key, CacheKey):
+            new_key = self.make_key(key.original_key(), version=version + delta)
+        else:
+            new_key = self.make_key(key, version=version + delta)
+
+        self.set(new_key, value, timeout=ttl, client=self.get_server(new_key))
+        self.delete(old_key, client=client)
+        return version + delta
 
     def incr(self, key, delta=1, version=None, client=None):
         if client is None:
@@ -161,8 +188,11 @@ class ShardClient(DefaultClient):
         return super(ShardClient, self)\
             .decr(key=key, delta=delta, version=version, client=client)
 
-    def keys(self, search):
-        pattern = self.make_key(search)
+    def iter_keys(self, key, version=None):
+        raise NotImplementedError("iter_keys not supported on sharded client")
+
+    def keys(self, search, version=None):
+        pattern = self.make_key(search, version=version)
         keys = []
         try:
             for server, connection in self._serverdict.items():
@@ -172,8 +202,8 @@ class ShardClient(DefaultClient):
             client = self.get_server(pattern)
             raise ConnectionInterrupted(connection=client)
 
-        decoded_keys = map(lambda x: x.decode('utf-8'), keys)
-        return list(map(lambda x: x.split(":", 2)[2], decoded_keys))
+        decoded_keys = (smart_text(k) for k in keys)
+        return [self.reverse_key(k) for k in decoded_keys]
 
     def delete_pattern(self, pattern, version=None):
         """
@@ -186,9 +216,11 @@ class ShardClient(DefaultClient):
         for server, connection in self._serverdict.items():
             keys.extend(connection.keys(pattern))
 
+        res = 0
         if keys:
             for server, connection in self._serverdict.items():
-                connection.delete(*keys)
+                res += connection.delete(*keys)
+        return res
 
     def close(self, **kwargs):
         if getattr(settings, "DJANGO_REDIS_CLOSE_CONNECTION", False):

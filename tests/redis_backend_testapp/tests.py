@@ -6,9 +6,14 @@ import sys
 import time
 import datetime
 
-from django.test import TestCase
+from django.conf import settings
 from django.core.cache import cache, get_cache
+from django.test import TestCase
 import redis_cache.cache
+
+from redis_cache.client import herd
+
+herd.CACHE_HERD_TIMEOUT = 2
 
 if sys.version_info[0] < 3:
     text_type = unicode
@@ -19,9 +24,63 @@ else:
     long = int
 
 
+def make_key(key, prefix, version):
+    return "{}#{}#{}".format(prefix, version, key)
+
+def reverse_key(key):
+    return key.split("#", 2)[2]
+
+
+class DjangoRedisCacheTestCustomKeyFunction(TestCase):
+    def setUp(self):
+        self.old_kf = settings.CACHES['default'].get('KEY_FUNCTION')
+        self.old_rkf = settings.CACHES['default'].get('REVERSE_KEY_FUNCTION')
+        settings.CACHES['default']['KEY_FUNCTION'] = 'redis_backend_testapp.tests.make_key'
+        settings.CACHES['default']['REVERSE_KEY_FUNCTION'] = 'redis_backend_testapp.tests.reverse_key'
+
+        self.cache = get_cache('default')
+        try:
+            self.cache.clear()
+        except Exception:
+            pass
+
+    def test_custom_key_function(self):
+        for key in ["foo-aa","foo-ab", "foo-bb","foo-bc"]:
+            self.cache.set(key, "foo")
+
+        res = self.cache.delete_pattern("*foo-a*")
+        self.assertTrue(bool(res))
+
+        keys = self.cache.keys("foo*")
+        self.assertEqual(set(keys), set(["foo-bb","foo-bc"]))
+        # ensure our custom function was actually called
+        try:
+            self.assertEqual(set(k.decode('utf-8') for k in self.cache.raw_client.keys('*')),
+                set(['#1#foo-bc', '#1#foo-bb']))
+        except NotImplementedError:
+            # not all clients support .keys()
+            pass
+
+    def tearDown(self):
+        settings.CACHES['default']['KEY_FUNCTION'] = self.old_kf
+        settings.CACHES['default']['REVERSE_KEY_FUNCTION'] = self.old_rkf
+
+
 class DjangoRedisCacheTests(TestCase):
     def setUp(self):
         self.cache = cache
+
+        try:
+            self.cache.clear()
+        except Exception:
+            pass
+
+
+    def test_exceptions(self):
+        from redis.exceptions import ConnectionError
+        with self.assertRaises(ConnectionError):
+            cache = get_cache("doesnotexist")
+            cache.get("foo")
 
     def test_setnx(self):
         # we should ensure there is no test_key_nx in redis
@@ -41,7 +100,6 @@ class DjangoRedisCacheTests(TestCase):
         res = self.cache.get("test_key_nx", None)
         self.assertEqual(res, None)
 
-
     def test_setnx_timeout(self):
         # test that timeout still works for nx=True
         res = self.cache.set("test_key_nx", 1, timeout=2, nx=True)
@@ -52,7 +110,7 @@ class DjangoRedisCacheTests(TestCase):
 
         # test that timeout will not affect key, if it was there
         self.cache.set("test_key_nx", 1)
-        res = self.cache.set("test_key_nx", 1, timeout=2, nx=True)
+        res = self.cache.set("test_key_nx", 2, timeout=2, nx=True)
         self.assertFalse(res)
         time.sleep(3)
         res = self.cache.get("test_key_nx", None)
@@ -91,15 +149,15 @@ class DjangoRedisCacheTests(TestCase):
 
     def test_save_dict(self):
         now_dt = datetime.datetime.now()
-        test_dict = {'id':1, 'date': now_dt, 'name': 'Foo'}
+        test_dict = {"id":1, "date": now_dt, "name": "Foo"}
 
         self.cache.set("test_key", test_dict)
         res = self.cache.get("test_key")
 
         self.assertIsInstance(res, dict)
-        self.assertEqual(res['id'], 1)
-        self.assertEqual(res['name'], 'Foo')
-        self.assertEqual(res['date'], now_dt)
+        self.assertEqual(res["id"], 1)
+        self.assertEqual(res["name"], "Foo")
+        self.assertEqual(res["date"], now_dt)
 
     def test_save_float(self):
         float_val = 1.345620002
@@ -117,46 +175,76 @@ class DjangoRedisCacheTests(TestCase):
         res = self.cache.get("test_key", None)
         self.assertEqual(res, None)
 
-    def test_set_add(self):
-        self.cache.set('add_key', 'Initial value')
-        self.cache.add('add_key', 'New value')
-        res = cache.get('add_key')
+    def test_timeout_0(self):
+        self.cache.set("test_key", 222, timeout=0)
+        res = self.cache.get("test_key", None)
+        self.assertEqual(res, 222)
 
-        self.assertEqual(res, 'Initial value')
+    def test_timeout_negative(self):
+        self.cache.set("test_key", 222, timeout=-1)
+        res = self.cache.get("test_key", None)
+        self.assertIsNone(res)
+
+        self.cache.set("test_key", 222, timeout=0)
+        self.cache.set("test_key", 222, timeout=-1)
+        res = self.cache.get("test_key", None)
+        self.assertIsNone(res)
+
+        # nx=True should not overwrite expire of key already in db
+        self.cache.set("test_key", 222, timeout=0)
+        self.cache.set("test_key", 222, timeout=-1, nx=True)
+        res = self.cache.get("test_key", None)
+        self.assertEqual(res, 222)
+
+    def test_set_add(self):
+        self.cache.set("add_key", "Initial value")
+        self.cache.add("add_key", "New value")
+        res = cache.get("add_key")
+
+        self.assertEqual(res, "Initial value")
 
     def test_get_many(self):
-        self.cache.set('a', 1)
-        self.cache.set('b', 2)
-        self.cache.set('c', 3)
+        self.cache.set("a", 1)
+        self.cache.set("b", 2)
+        self.cache.set("c", 3)
 
-        res = self.cache.get_many(['a','b','c'])
-        self.assertEqual(res, {'a': 1, 'b': 2, 'c': 3})
+        res = self.cache.get_many(["a","b","c"])
+        self.assertEqual(res, {"a": 1, "b": 2, "c": 3})
 
     def test_get_many_unicode(self):
-        self.cache.set('a', '1')
-        self.cache.set('b', '2')
-        self.cache.set('c', '3')
+        self.cache.set("a", "1")
+        self.cache.set("b", "2")
+        self.cache.set("c", "3")
 
-        res = self.cache.get_many(['a','b','c'])
-        self.assertEqual(res, {'a': '1', 'b': '2', 'c': '3'})
+        res = self.cache.get_many(["a","b","c"])
+        self.assertEqual(res, {"a": "1", "b": "2", "c": "3"})
 
     def test_set_many(self):
-        self.cache.set_many({'a': 1, 'b': 2, 'c': 3})
-        res = self.cache.get_many(['a', 'b', 'c'])
-        self.assertEqual(res, {'a': 1, 'b': 2, 'c': 3})
+        self.cache.set_many({"a": 1, "b": 2, "c": 3})
+        res = self.cache.get_many(["a", "b", "c"])
+        self.assertEqual(res, {"a": 1, "b": 2, "c": 3})
 
     def test_delete(self):
-        self.cache.set_many({'a': 1, 'b': 2, 'c': 3})
-        self.cache.delete('a')
+        self.cache.set_many({"a": 1, "b": 2, "c": 3})
+        res = self.cache.delete("a")
+        self.assertTrue(bool(res))
 
-        res = self.cache.get_many(['a', 'b', 'c'])
-        self.assertEqual(res, {'b': 2, 'c': 3})
+        res = self.cache.get_many(["a", "b", "c"])
+        self.assertEqual(res, {"b": 2, "c": 3})
+
+        res = self.cache.delete("a")
+        self.assertFalse(bool(res))
 
     def test_delete_many(self):
-        self.cache.set_many({'a': 1, 'b': 2, 'c': 3})
-        self.cache.delete_many(['a','b'])
-        res = self.cache.get_many(['a', 'b', 'c'])
-        self.assertEqual(res, {'c': 3})
+        self.cache.set_many({"a": 1, "b": 2, "c": 3})
+        res = self.cache.delete_many(["a","b"])
+        self.assertTrue(bool(res))
+
+        res = self.cache.get_many(["a", "b", "c"])
+        self.assertEqual(res, {"c": 3})
+
+        res = self.cache.delete_many(["a","b"])
+        self.assertFalse(bool(res))
 
     def test_incr(self):
         try:
@@ -260,33 +348,85 @@ class DjangoRedisCacheTests(TestCase):
             print(e)
 
     def test_delete_pattern(self):
-        for key in ['foo-aa','foo-ab', 'foo-bb','foo-bc']:
+        for key in ["foo-aa","foo-ab", "foo-bb","foo-bc"]:
             self.cache.set(key, "foo")
 
-        self.cache.delete_pattern('*foo-a*')
+        res = self.cache.delete_pattern("*foo-a*")
+        self.assertTrue(bool(res))
+
         keys = self.cache.keys("foo*")
-        self.assertEqual(set(keys), set(['foo-bb','foo-bc']))
+        self.assertEqual(set(keys), set(["foo-bb","foo-bc"]))
+
+        res = self.cache.delete_pattern("*foo-a*")
+        self.assertFalse(bool(res))
 
     def test_close(self):
-        cache = get_cache('default')
+        cache = get_cache("default")
         cache.set("f", "1")
         cache.close()
 
-    def test_reuse_connection_pool(self):
-        try:
-            cache1 = get_cache('default')
-            cache2 = get_cache('default')
+    def test_ttl(self):
+        cache = get_cache("default")
+        _params = cache._params
+        _is_herd = (_params["OPTIONS"]["CLIENT_CLASS"] ==
+                    "redis_cache.client.HerdClient")
+        _is_shard = (_params["OPTIONS"]["CLIENT_CLASS"] ==
+                    "redis_cache.client.ShardClient")
 
-            self.assertNotEqual(cache1, cache2)
-            self.assertNotEqual(cache1.raw_client, cache2.raw_client)
-            self.assertEqual(cache1.raw_client.connection_pool,
-                             cache2.raw_client.connection_pool)
-        except NotImplementedError:
-            pass
+        # Not supported for shard client.
+        if _is_shard:
+            return
+
+        # Test ttl
+        cache.set("foo", "bar", 10)
+        ttl = cache.ttl("foo")
+
+        if _is_herd:
+            self.assertAlmostEqual(ttl, 12)
+        else:
+            self.assertAlmostEqual(ttl, 10)
+
+        # Test ttl None
+        cache.set("foo", "foo", timeout=None)
+        ttl = cache.ttl("foo")
+        self.assertEqual(ttl, None)
+
+        # Test ttl with expired key
+        cache.set("foo", "foo", timeout=-1)
+        ttl = cache.ttl("foo")
+
+        # Test ttl with not existent key
+        ttl = cache.ttl("not-existent-key")
+        self.assertEqual(ttl, 0)
+
+    def test_iter_keys(self):
+        cache = get_cache("default")
+        _params = cache._params
+        _is_shard = (_params["OPTIONS"]["CLIENT_CLASS"] ==
+                    "redis_cache.client.ShardClient")
+
+        if _is_shard:
+            return
+
+        cache.set("foo1", 1)
+        cache.set("foo2", 1)
+        cache.set("foo3", 1)
+
+        # Test simple result
+        result = set(cache.iter_keys("foo*"))
+        self.assertEqual(result, set(["foo1", "foo2", "foo3"]))
+
+        # Test limited result
+        result = list(cache.iter_keys("foo*", itersize=2))
+        self.assertEqual(len(result), 3)
+
+        # Test generator object
+        result = cache.iter_keys("foo*")
+        self.assertNotEqual(next(result), None)
 
     def test_master_slave_switching(self):
         try:
-            cache = get_cache('sample')
+            cache = get_cache("sample")
             client = cache.client
             client._server = ["foo", "bar",]
             client._clients = ["Foo", "Bar"]
@@ -301,15 +441,15 @@ class DjangoOmitExceptionsTests(TestCase):
     def setUp(self):
         self._orig_setting = redis_cache.cache.DJANGO_REDIS_IGNORE_EXCEPTIONS
         redis_cache.cache.DJANGO_REDIS_IGNORE_EXCEPTIONS = True
-        self.cache = get_cache('doesnotexist')
+        self.cache = get_cache("doesnotexist")
 
     def tearDown(self):
         redis_cache.cache.DJANGO_REDIS_IGNORE_EXCEPTIONS = self._orig_setting
 
     def test_get(self):
-        self.assertIsNone(self.cache.get('key'))
-        self.assertEqual(self.cache.get('key', 'default'), 'default')
-        self.assertEqual(self.cache.get('key', default='default'), 'default')
+        self.assertIsNone(self.cache.get("key"))
+        self.assertEqual(self.cache.get("key", "default"), "default")
+        self.assertEqual(self.cache.get("key", default="default"), "default")
 
 
 from django.contrib.sessions.backends.cache import SessionStore as CacheSession

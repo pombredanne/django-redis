@@ -15,6 +15,7 @@ except ImportError:
 
 from django.core.exceptions import ImproperlyConfigured
 from django.conf import settings
+from django.core.cache.backends.base import get_key_func
 
 from redis import ConnectionPool as RedisConnectionPool
 from redis.connection import UnixDomainSocketConnection, Connection
@@ -48,21 +49,8 @@ class CacheKey(object):
             return smart_text(self._key)
 
     def original_key(self):
-        _, key = self._key.rsplit(":", 1)
+        key = self._key.rsplit(":", 1)[1]
         return key
-
-
-class Singleton(type):
-    """ Singleton metaclass. """
-
-    def __init__(cls, name, bases, dct):
-        cls.__instance = None
-        type.__init__(cls, name, bases, dct)
-
-    def __call__(cls, *args, **kw):
-        if cls.__instance is None:
-            cls.__instance = type.__call__(cls, *args,**kw)
-        return cls.__instance
 
 
 def load_class(path):
@@ -70,8 +58,9 @@ def load_class(path):
     Load class from path.
     """
 
+    mod_name, klass_name = path.rsplit('.', 1)
+
     try:
-        mod_name, klass_name = path.rsplit('.', 1)
         mod = import_module(mod_name)
     except AttributeError as e:
         raise ImproperlyConfigured('Error importing {0}: "{1}"'.format(mod_name, e))
@@ -83,4 +72,5 @@ def load_class(path):
 
     return klass
 
-
+def default_reverse_key(key):
+    return key.split(':', 2)[2]

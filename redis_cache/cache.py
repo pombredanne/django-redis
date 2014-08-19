@@ -1,17 +1,15 @@
 # -*- coding: utf-8 -*-
 
+import functools,warnings
+
 from django.conf import settings
 from django.core.cache.backends.base import BaseCache
-from django.core.exceptions import ImproperlyConfigured
-from django.core.cache import get_cache
 
 from .util import load_class
 from .exceptions import ConnectionInterrupted
 
-import functools
 
-DJANGO_REDIS_IGNORE_EXCEPTIONS = getattr(settings,
-            'DJANGO_REDIS_IGNORE_EXCEPTIONS', False)
+DJANGO_REDIS_IGNORE_EXCEPTIONS = getattr(settings, "DJANGO_REDIS_IGNORE_EXCEPTIONS", False)
 
 
 def omit_exception(method):
@@ -22,15 +20,16 @@ def omit_exception(method):
     Note: this doesn't handle the `default` argument in .get().
     """
 
-    if not DJANGO_REDIS_IGNORE_EXCEPTIONS:
-        return method
-
     @functools.wraps(method)
     def _decorator(self, *args, **kwargs):
         try:
             return method(self, *args, **kwargs)
-        except ConnectionInterrupted:
-            return None
+        except ConnectionInterrupted as e:
+            if self._ignore_exceptions:
+                return None
+
+            raise e.parent
+
     return _decorator
 
 
@@ -40,15 +39,12 @@ class RedisCache(BaseCache):
         self._server = server
         self._params = params
 
-        options = params.get('OPTIONS', {})
-        self._client_cls = options.get('CLIENT_CLASS', 'redis_cache.client.DefaultClient')
+        options = params.get("OPTIONS", {})
+        self._client_cls = options.get("CLIENT_CLASS", "redis_cache.client.DefaultClient")
         self._client_cls = load_class(self._client_cls)
         self._client = None
 
-        self._fallback_name = options.get('FALLBACK', None)
-        self._fallback = None
-        self._fallback_counter = 0
-        self._on_fallback = False
+        self._ignore_exceptions = options.get("IGNORE_EXCEPTIONS", DJANGO_REDIS_IGNORE_EXCEPTIONS)
 
     @property
     def client(self):
@@ -66,21 +62,9 @@ class RedisCache(BaseCache):
         pluggable clients supports this feature. If not supports
         this raises NotImplementedError
         """
+        warnings.warn("raw_client is deprecated. use self.client.get_client instead",
+                                  DeprecationWarning, stacklevel=2)
         return self.client.get_client(write=True)
-
-    @property
-    def fallback_client(self):
-        """
-        Used in fallback mode on the primary client does not
-        connect to the server.
-        """
-
-        if self._fallback is None:
-            try:
-                self._fallback = get_cache(self._fallback_name)
-            except TypeError:
-                raise ImproperlyConfigured("%s cache backend is not configured" % (self._fallback_name))
-        return self._fallback
 
     @omit_exception
     def set(self, *args, **kwargs):
@@ -143,6 +127,14 @@ class RedisCache(BaseCache):
     @omit_exception
     def keys(self, *args, **kwargs):
         return self.client.keys(*args, **kwargs)
+
+    @omit_exception
+    def iter_keys(self, *args, **kwargs):
+        return self.client.iter_keys(*args, **kwargs)
+
+    @omit_exception
+    def ttl(self, *args, **kwargs):
+        return self.client.ttl(*args, **kwargs)
 
     @omit_exception
     def close(self, **kwargs):

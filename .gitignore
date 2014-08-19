@@ -13,6 +13,9 @@ development_settings.py
 .pydevproject
 .settings
 versiontools*
-build*
+_build*
+doc/index.html
 dist*
 *.swp
+\#*
+.\#*

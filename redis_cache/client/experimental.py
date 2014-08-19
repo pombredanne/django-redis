@@ -1,7 +1,12 @@
 # -*- coding: utf-8 -*-
 
 from django.conf import settings
-from django.utils import timezone
+try:
+    from django.utils.timezone import now as datetime_now
+    assert datetime_now
+except ImportError:
+    import datetime
+    datetime_now = datetime.datetime.now
 from .default import DefaultClient
 from ..exceptions import ConnectionInterrumped
 import functools
@@ -16,7 +21,7 @@ def auto_failover(method):
     @functools.wraps(method)
     def _decorator(self, *args, **kwargs):
         if self._in_fallback:
-            pass_seconds = (timezone.now() - self._in_fallback_date).total_seconds()
+            pass_seconds = (datetime_now() - self._in_fallback_date).total_seconds()
             if pass_seconds > self._options.get("FAILOVER_TIME", 30):
                 print("Go to default connection")
                 self._client = self._old_client
@@ -38,7 +43,7 @@ def auto_failover(method):
                 self._client = self.fallback_client
 
                 self._in_fallback = True
-                self._in_fallback_date = timezone.now()
+                self._in_fallback_date = datetime_now()
 
             return method(self, *args, **kwargs)
     return _decorator
